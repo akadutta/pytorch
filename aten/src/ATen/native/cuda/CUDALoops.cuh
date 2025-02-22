@@ -379,6 +379,34 @@ C10_HOST_DEVICE typename traits::result_type invoke(
   return invoke_impl<traits>(f, data, strides, dtypes, i, Indices{});
 }
 
+template <typename CastToT, typename CastFromT0, typename CastFromT1, typename traits, typename func_t, typename index_t, size_t... I>
+C10_HOST_DEVICE typename traits::result_type invoke_impl_templated(
+    const func_t& f,
+    char* const C10_RESTRICT data[],
+    const index_t strides[],
+    const ScalarType dtypes[],
+    int i,
+    std::index_sequence<I...>) {
+  (void)strides;
+  (void)i;
+  return f(c10::fetch_and_cast<typename traits::template arg<I>::type>(
+      dtypes[I], data[I] + i * strides[I])...);
+}
+
+template <
+    typename func_t,
+    typename index_t,
+    typename traits = function_traits<func_t>>
+C10_HOST_DEVICE typename traits::result_type invoke_templated(
+    const func_t& f,
+    char* const C10_RESTRICT data[],
+    const index_t strides[],
+    const ScalarType dtypes[],
+    int i) {
+  using Indices = std::make_index_sequence<traits::arity>;
+  return invoke_impl_templated<float, float, BFloat16, traits>(f, data, strides, dtypes, i, Indices{});
+}
+
 template <typename func_t>
 void gpu_kernel_impl_nocast(TensorIteratorBase& iter, const func_t& f) {
   using traits = function_traits<func_t>;
@@ -601,6 +629,25 @@ void gpu_kernel_impl(TensorIteratorBase& iter, const func_t& f) {
     for (int i = 0; i < ntensors; i++) {
       dtypes[i] = iter.dtype(i);
     }
+
+    using float_map = c10::CppTypeToScalarType<float>;
+    using bfloat16_map = c10::CppTypeToScalarType<BFloat16>;
+    if (iter.ninputs() == 2 && iter.input_dtype(0) == float_map::value &&
+        iter.input_dtype(1) == bfloat16_map::value) {
+      using func_tuple = typename traits::ArgsTuple;
+      if constexpr (std::is_same_v<float, arg0_t> && traits::arity == 2 &&
+          check_types<func_tuple, traits::arity, 0>::check()) {
+        auto offset_calc = ::make_offset_calculator<traits::arity + 1>(iter);
+        launch_legacy_kernel<128, 4>(numel, [=] GPU_LAMBDA(int idx) {
+          auto offsets = offset_calc.get(idx);
+          void* out = data[0] + offsets[0];
+          arg0_t result = invoke_templated(f, &data.data[1], &offsets.data[1], &dtypes.data[1], 1);
+          c10::cast_and_store<arg0_t>(dtypes[0], out, result);
+        });
+	return;
+      }
+    }
+    
     auto offset_calc = ::make_offset_calculator<traits::arity + 1>(iter);
     launch_legacy_kernel<128, 4>(numel, [=] GPU_LAMBDA(int idx) {
       auto offsets = offset_calc.get(idx);
