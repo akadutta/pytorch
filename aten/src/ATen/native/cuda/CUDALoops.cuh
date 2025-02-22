@@ -90,6 +90,15 @@ __global__ void vectorized_elementwise_kernel(int N, func_t f, array_t data) {
   }
 }
 
+template <int vec_size, typename func_t, typename array_t, typename OutputType, typename... InputTypes>
+C10_LAUNCH_BOUNDS_1(vectorized_templated_config::num_threads())
+__global__ void vectorized_templated_elementwise_kernel(int N, func_t f, array_t data) {
+  templated_elementwise_kernel_helper<vectorized_templated_config::thread_work_size()>(
+    f, memory::policies::vectorized_templated<vectorized_templated_config::thread_work_size(),
+      vectorized_templated_config::num_threads(), vectorized_templated_config::block_work_size(),
+      vec_size, array_t, OutputType, InputTypes...>(data));
+}
+
 template <
     typename func_t,
     typename array_t,
